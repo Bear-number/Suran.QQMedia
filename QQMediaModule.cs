@@ -879,20 +879,6 @@ public class QQMediaModule(
     /// ffmpeg 取值优先级：配置指定 → Alife 自带运行时里 imageio-ffmpeg 附带的那份（清单已声明该 pip 依赖）→ PATH。
     /// 返回空串表示一处都没有，此时交给 yt-dlp 自己找（它也可能直接跑通，因为 yt-dlp 会再探一次 PATH）。
     /// </summary>
-    string ResolveFfmpegPath()
-    {
-        string configured = Configuration.FfmpegPath.Trim();
-        if (configured.Length > 0)
-        {
-            return configured;
-        }
-        string bundled = FindBundledFfmpeg();
-        if (bundled.Length > 0)
-        {
-            return bundled;
-        }
-        return FindOnPath(ExecutableName("ffmpeg")) ?? "";
-    }
 
     /// <summary>
     /// imageio-ffmpeg 这个 pip 包会把一份成品 ffmpeg 可执行文件放在包内的 binaries 目录里，
@@ -925,6 +911,21 @@ public class QQMediaModule(
 
     // 宿主热编译会按平台注入 WINDOWS/ANDROID/LINUX 符号，可执行文件名后缀只能按平台取
     static string ExecutableName(string name) => OperatingSystem.IsWindows() ? name + ".exe" : name;
+
+    string ResolveFfmpegPath()
+    {
+        string configured = Configuration.FfmpegPath.Trim();
+        if (configured.Length > 0)
+        {
+            return configured;
+        }
+        string bundled = FindBundledFfmpeg();
+        if (bundled.Length > 0)
+        {
+            return bundled;
+        }
+        return FindOnPath(ExecutableName("ffmpeg")) ?? "";
+    }
 
     static string SizeText(long bytes)
     {
