@@ -1,13 +1,19 @@
 # Suran.QQMedia
 
-把工作区的 `qq-music-sender` 与 `qq-video-sender` 两个技能合并成一个插件：从 B 站（或带代理的 YouTube）下载音频/视频，以 **QQ 语音条**和**QQ 视频消息**发出去。按需求只做"下载 + 发送"，网易云音乐卡片那套（`search_ncm_song` / `send_music_card`）没有移植——发网易云卡片用 Suran.ShareArk。
+从 B 站（或带代理的 YouTube）下载音频/视频，以 **QQ 语音条**和**QQ 视频消息**发出去。只做"下载 + 发送"这一件事，音乐分享卡片不在本插件范围内（那是另一类 msg_type，需要签名，不属这里的功能面）。
 
 ## 版本
-4.1.0（对应 Alife 客户端 4.2.x）
+5.0.0（对应 Alife 客户端 5.0.x；本机 5.0.2 在役客户端已热编译装载成功）
+
+## 5.0.0 的改动
+- 版本号对齐客户端主版本（官方约定：插件版本首位应与客户端一致，`PluginSystem.IsClientCompatible` 按主版本判定）
+- 清单新增 `Environments.pip: yt-dlp + imageio-ffmpeg`：两个外部依赖改由宿主同步插件环境时自动装进自带 Python，不再让你手动 `-m pip install`
+- ffmpeg 查找顺序：配置指定 → 自带运行时里 imageio-ffmpeg 附带的那份 → PATH；找到了就按 yt-dlp 支持的完整路径传 `--ffmpeg-location`
+- Python/ffmpeg 的可执行文件名按平台取（Windows 才加 `.exe`），自带运行时的目录扫描也不再写死 `python.exe`
 
 ## 依赖
 - Alife.Function.FunctionCaller
-- 外部：装了 `yt-dlp` 的 Python（本机是 `D:\Alife\Runtime\Python312\python.exe`，yt-dlp 2026.08.19）；发视频还要 `ffmpeg`（本机 8.1.2，在 PATH 上）
+- 外部：`yt-dlp`（下载器）与 `ffmpeg`（发视频合流）。两者已写进本插件清单的 `Environments.pip`（`yt-dlp`、`imageio-ffmpeg`），宿主同步插件环境时会自动装进自带 Python；插件按「配置指定 → 自带运行时 → PATH」的顺序找它们，也可以自己在配置里填路径
 
 ## AI 函数
 | 函数 | 说明 |
@@ -54,7 +60,7 @@
 - 走 OneBot v11 正向 WebSocket（配置里 `ws://127.0.0.1:3001`），消息段是 `{"type":"record"/"video","data":{"file":"绝对路径"}}`
 - 判成功必须拿到 `data.message_id`；retcode 1404/1400/1200 会分别说明是"该端没这个动作""段类型不认""整条被拒"
 - **失败原因先读 `message`、没有再读 `wording`**：SnowLuma 的失败包只有 `wording` 键，只读 `message` 在它下面所有失败都显示空原因（4.1.0 补上，与另外四个插件同一改法）
-- 复用 Suran.ShareArk 那套已验证的 WS 传输（echo 匹配、断线重连、两次尝试）
+- WS 传输自带一套 echo 匹配、断线重连、失败重试两次的实现
 
 ## 注意事项
 - `image` / `record` / `video` 段在 **LLOneBot 7.12.14 本机实弹通过**（2026-10-15 发进指定群并用 `delete_msg` 撤回，4 秒后翻历史确认段真落成了媒体元素）。**NapCat 与 SnowLuma 本机没有，仍未实机验证**——三端差异是源码核对的：成功一律要认 `data.message_id`，不认识的接口回 1404，NapCat 1200 / SnowLuma 1400 会整条退回。换端第一次用请先发给自己或小群

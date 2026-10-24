@@ -27,11 +27,11 @@ public class QQMediaConfig
     public string WsUrl { get; set; } = "ws://127.0.0.1:3001";
 
     [DisplayName("下载·Python解释器")]
-    [Description("装了 yt-dlp 的 python.exe 完整路径；留空则自动找 Alife 自带运行时里的 Python*，再找 PATH 上的 python 与 yt-dlp")]
+    [Description("装了 yt-dlp 的 python 完整路径；留空则自动找 Alife 自带运行时里的 Python*，再找 PATH 上的 python 与 yt-dlp。yt-dlp 已写进本插件清单的 pip 依赖，宿主同步插件环境时会自动装进自带 Python")]
     public string PythonPath { get; set; } = "";
 
     [DisplayName("下载·ffmpeg路径")]
-    [Description("发视频要靠它把音视频合并成mp4。留空由 yt-dlp 自己在 PATH 里找")]
+    [Description("发视频要靠它把音视频合并成mp4。留空先找 Alife 自带运行时里 imageio-ffmpeg 附带的那份（清单已声明该 pip 依赖），再交给 yt-dlp 在 PATH 里找")]
     public string FfmpegPath { get; set; } = "";
 
     [DisplayName("下载·代理地址")]
@@ -165,14 +165,16 @@ public class QQMediaModule(
             lines.Add("❌ yt-dlp：" + ytDlpError.Message);
         }
 
-        string ffmpeg = Configuration.FfmpegPath.Trim();
-        if (ffmpeg.Length > 0)
+        string configuredFfmpeg = Configuration.FfmpegPath.Trim();
+        if (configuredFfmpeg.Length > 0)
         {
-            lines.Add("ffmpeg：配置为 " + ffmpeg + (File.Exists(ffmpeg) ? "（存在）" : "（不存在，发视频会失败）"));
+            lines.Add("ffmpeg：配置为 " + configuredFfmpeg + (File.Exists(configuredFfmpeg) ? "（存在）" : "（不存在，发视频会失败）"));
         }
         else
         {
-            lines.Add("ffmpeg：未配置，交给 yt-dlp 在 PATH 里找" + (FindOnPath("ffmpeg.exe") == null ? "（本机PATH里没找到，发视频大概率失败，建议在配置里填完整路径）" : "（本机PATH里有：" + FindOnPath("ffmpeg.exe") + "）"));
+            string found = ResolveFfmpegPath();
+            lines.Add("ffmpeg：未配置，" + (found.Length > 0 ? "自动找到 " + found
+                : "自带运行时与 PATH 里都没有（清单里的 pip 依赖没同步，或得自己在配置里填完整路径）"));
         }
 
         lines.Add("B站直连：" + await ProbeAsync(ProbeBiliUrl, null));
@@ -240,9 +242,10 @@ public class QQMediaModule(
         if (isVideo)
         {
             arguments.Add("--merge-output-format mp4");
-            if (Configuration.FfmpegPath.Trim().Length > 0)
+            string ffmpegLocation = ResolveFfmpegPath();
+            if (ffmpegLocation.Length > 0)
             {
-                arguments.Add("--ffmpeg-location " + Quote(Configuration.FfmpegPath.Trim()));
+                arguments.Add("--ffmpeg-location " + Quote(ffmpegLocation));
             }
         }
         if (IsBiliTarget(query, site))
@@ -317,7 +320,7 @@ public class QQMediaModule(
             {
                 foreach (string directory in Directory.GetDirectories(runtimeRoot, "Python*"))
                 {
-                    string candidate = Path.Combine(directory, "python.exe");
+                    string candidate = Path.Combine(directory, ExecutableName("python"));
                     runtimePythons.Add(candidate);
                     candidates.Add((candidate, "-m yt_dlp "));
                 }
@@ -353,9 +356,9 @@ public class QQMediaModule(
                 }
             }
             throw new Exception("没找到可用的 yt-dlp。试过的：" + string.Join("；", failures)
-                + "。解决办法：给 Alife 自带 Python 装（"
-                + (runtimePythons.Count > 0 ? runtimePythons[0] + " -m pip install -U yt-dlp" : "Runtime 目录下没有 Python*，得自己准备一个装了 yt-dlp 的 python.exe")
-                + "），或在插件配置「下载·Python解释器」里填路径");
+                + "。本插件清单已把 yt-dlp 声明成 pip 依赖，让宿主同步一次插件环境（它会往 "
+                + (runtimePythons.Count > 0 ? runtimePythons[0] : "自带 Python") + " 装）就会补上；"
+                + "急着用也可以自己执行 -m pip install -U yt-dlp，或在插件配置「下载·Python解释器」里填路径");
         }
         finally
         {
@@ -871,6 +874,57 @@ public class QQMediaModule(
         }
         return null;
     }
+
+    /// <summary>
+    /// ffmpeg 取值优先级：配置指定 → Alife 自带运行时里 imageio-ffmpeg 附带的那份（清单已声明该 pip 依赖）→ PATH。
+    /// 返回空串表示一处都没有，此时交给 yt-dlp 自己找（它也可能直接跑通，因为 yt-dlp 会再探一次 PATH）。
+    /// </summary>
+    string ResolveFfmpegPath()
+    {
+        string configured = Configuration.FfmpegPath.Trim();
+        if (configured.Length > 0)
+        {
+            return configured;
+        }
+        string bundled = FindBundledFfmpeg();
+        if (bundled.Length > 0)
+        {
+            return bundled;
+        }
+        return FindOnPath(ExecutableName("ffmpeg")) ?? "";
+    }
+
+    /// <summary>
+    /// imageio-ffmpeg 这个 pip 包会把一份成品 ffmpeg 可执行文件放在包内的 binaries 目录里，
+    /// 文件名带版本号且会变（ffmpeg-win-x86_64-v7.1.exe），所以只能通配找，不能写死名字。
+    /// </summary>
+    static string FindBundledFfmpeg()
+    {
+        string runtimeRoot = AlifePath.RuntimeFolderPath;
+        if (Directory.Exists(runtimeRoot) == false)
+        {
+            return "";
+        }
+        foreach (string python in Directory.GetDirectories(runtimeRoot, "Python*"))
+        {
+            string binaries = Path.Combine(python, "Lib", "site-packages", "imageio_ffmpeg", "binaries");
+            if (Directory.Exists(binaries) == false)
+            {
+                continue;
+            }
+            foreach (string file in Directory.GetFiles(binaries, "ffmpeg-*"))
+            {
+                if (file.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || OperatingSystem.IsWindows() == false)
+                {
+                    return file;
+                }
+            }
+        }
+        return "";
+    }
+
+    // 宿主热编译会按平台注入 WINDOWS/ANDROID/LINUX 符号，可执行文件名后缀只能按平台取
+    static string ExecutableName(string name) => OperatingSystem.IsWindows() ? name + ".exe" : name;
 
     static string SizeText(long bytes)
     {
