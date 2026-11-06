@@ -3,7 +3,12 @@
 从 B 站（或带代理的 YouTube）下载音频/视频，以 **QQ 语音条**和**QQ 视频消息**发出去。只做"下载 + 发送"这一件事，音乐分享卡片不在本插件范围内（那是另一类 msg_type，需要签名，不属这里的功能面）。
 
 ## 版本
-5.0.0（对应 Alife 客户端 5.0.x；本机 5.0.2 在役客户端已热编译装载成功）
+5.1.0（对应 Alife 客户端 5.0.x）
+
+## 5.1.0 的改动
+- **用户发视频链接就自动下载**：消息里带 B 站 / YouTube 视频链接时，后台下载并发回同一个群 / 私聊
+- 自动下载前先识别要音频还是视频：音乐平台链接、消息里的「歌 / 来首 / 伴奏 / MV」等词都会影响结果
+- 点歌加 `mv` 参数：`SendMusic(..., mv=true)` 直接发这首歌的 MV（视频）
 
 ## 5.0.0 的改动
 - 版本号对齐客户端主版本（官方约定：插件版本首位应与客户端一致，`PluginSystem.IsClientCompatible` 按主版本判定）
@@ -18,7 +23,7 @@
 ## AI 函数
 | 函数 | 说明 |
 |---|---|
-| SendMusic(keyword, targetId?, type?, site?) | 关键词搜 B 站下载 m4a，以语音条发送。`site=yt` 改走 YouTube（需在配置里填代理）。本地有同名文件直接复用；只是名字前后缀接近时也会复用，那种情况回报里写清用的是哪个文件 |
+| SendMusic(keyword, targetId?, type?, site?, mv?) | 关键词搜 B 站下载 m4a，以语音条发送。`site=yt` 改走 YouTube（需在配置里填代理）；`mv=true` 改下载视频发 MV。本地有同名文件直接复用；只是名字前后缀接近时也会复用，那种情况回报里写清用的是哪个文件 |
 | SendVideo(source, targetId?, type?, site?) | BV 号 / av 号 / 视频链接 / b23.tv 短链 / 关键词，下载合并成 mp4，以视频消息发送（对方可直接播，不是文件消息） |
 | MediaEnv() | 自检：用的是哪个 yt-dlp、ffmpeg 在不在、B 站与 YouTube 的直连/代理连通性、**按插件真用的写法实跑一次 B 站搜索（`--simulate` 只模拟不下载）**、两个目录各有多少可复用文件/残片/非媒体文件与清理上限、协议端是哪个端、当前开关与超时 |
 
@@ -27,7 +32,8 @@
 ## 配置
 | 键 | 默认 | 说明 |
 |---|---|---|
-| WsUrl | `ws://127.0.0.1:3001` | OneBot 正向 WebSocket，语音条与视频段从这里发出 |
+| WsUrl | 空 | OneBot 正向 WebSocket，语音条与视频段从这里发出。**留空 = 自动跟随「QQ 聊天」插件**的配置 |
+| OneBotToken | 空 | 协议端访问令牌。留空 = 跟随「QQ 聊天」插件 |
 | PythonPath | 空 | 装了 `yt-dlp` 的 `python.exe` 完整路径；留空自动找 Alife 自带运行时的 `Python*`，再找 PATH |
 | FfmpegPath | 空 | 发视频要它合并音视频；留空由 yt-dlp 在 PATH 里找 |
 | ProxyUrl | 空 | HTTP 代理，如 `http://127.0.0.1:7890`。**只在 `site=yt` 时加上**，B 站不需要 |
@@ -37,6 +43,20 @@
 | MaxCacheFiles | 20 | 每个目录各自的媒体文件数上限，超了先删最旧的；**填 0=不清理** |
 | CleanupCount | 5 | 超过上限时一次删几个 |
 | EnableSend | 开 | 关掉后 SendMusic/SendVideo 不可用，也不会发生下载 |
+| AutoDownloadLink | 开 | 用户消息里带 B 站/YouTube 视频链接时，自动下载并发出来 |
+
+## 链接自动下载
+用户消息里带视频链接时，后台下载并发回同一个群 / 私聊，不改写消息本身。
+
+- 认的链接：BV 号、av 号、`bilibili.com/video/...`、`b23.tv/...` 短链、`youtube.com/watch`、`youtu.be/...`
+- 只认视频站：`bilibili.com`、`b23.tv`、`youtube.com`、`youtu.be`；其它网页链接不触发
+- 音频还是视频：
+  - 音乐平台（`music.163.com`、`y.qq.com`、`music.youtube.com`、Spotify、Apple Music、酷我/酷狗/咪咕、`bilibili.com/audio/...`）→ 语音条
+  - 消息里有「视频 / 画面 / 片段 / 回放 / MV」→ 视频
+  - 消息里有「歌 / 音乐 / 来首 / 点歌 / 伴奏 / 翻唱 / 纯音乐 / BGM / OST」→ 语音条
+  - 都没说 → 视频
+- 同一条链接 10 分钟内只下一次；下载复用现有缓存
+- 失败只记日志（`[QQMedia] 链接自动下载…`），不往会话里发消息
 
 ## 下载
 - 音频 `-f "ba[ext=m4a]/ba"`，视频 `-f "bv*+ba/b" --merge-output-format mp4`（合并必须有 ffmpeg，实测 54MB 用时约 2.8 秒）

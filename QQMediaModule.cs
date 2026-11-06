@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -22,16 +24,20 @@ namespace Suran.QQMedia;
 
 public class QQMediaConfig
 {
-    [DisplayName("协议端地址")]
-    [Description("OneBot正向WebSocket地址，语音条与视频段都从这里发出去")]
-    public string WsUrl { get; set; } = "ws://127.0.0.1:3001";
+    [DisplayName("基础·协议端地址")]
+    [Description("留空 = 自动跟随「QQ 聊天」插件的配置（推荐）。填了就用这里的，例如 ws://127.0.0.1:3001")]
+    public string WsUrl { get; set; } = "";
+
+    [DisplayName("基础·访问令牌")]
+    [Description("与协议端配置的 token 一致。留空 = 跟随「QQ 聊天」插件。填了地址却没填这里，协议端一开 token 就会连不上")]
+    public string OneBotToken { get; set; } = "";
 
     [DisplayName("下载·Python解释器")]
-    [Description("装了 yt-dlp 的 python 完整路径；留空则自动找 Alife 自带运行时里的 Python*，再找 PATH 上的 python 与 yt-dlp。yt-dlp 已写进本插件清单的 pip 依赖，宿主同步插件环境时会自动装进自带 Python")]
+    [Description("装了 yt-dlp 的 python.exe 完整路径，留空自动查找。")]
     public string PythonPath { get; set; } = "";
 
     [DisplayName("下载·ffmpeg路径")]
-    [Description("发视频要靠它把音视频合并成mp4。留空先找 Alife 自带运行时里 imageio-ffmpeg 附带的那份（清单已声明该 pip 依赖），再交给 yt-dlp 在 PATH 里找")]
+    [Description("合并音视频用的 ffmpeg 路径，留空自动查找。")]
     public string FfmpegPath { get; set; } = "";
 
     [DisplayName("下载·代理地址")]
@@ -65,11 +71,16 @@ public class QQMediaConfig
     [DisplayName("开关·发送媒体")]
     [Description("关闭后 SendMusic/SendVideo 都不可用，也不会发生下载")]
     public bool EnableSend { get; set; } = true;
+
+    [DisplayName("开关·发视频链接就下载")]
+    [Description("用户消息里带 B站/YouTube 视频链接时，自动下载视频并发出来，默认开")]
+    public bool AutoDownloadLink { get; set; } = true;
 }
 
 [Module("QQ音视频发送",
     "把B站/YouTube的音频与视频下载成文件，以QQ语音条和视频消息发到当前群或私聊",
-    defaultCategory: "苏染的工具")]
+    defaultCategory: "苏染的工具",
+    EditorUI = typeof(QQMediaUI))]
 public class QQMediaModule(
     XmlFunctionCaller functionCaller,
     ILogger<QQMediaModule> logger,
@@ -77,6 +88,66 @@ public class QQMediaModule(
 ) : ChatBehaviour, IConfigurable<QQMediaConfig>
 {
     public QQMediaConfig Configuration { get; set; } = null!;
+
+    /// <summary>
+    /// 协议端连接信息。
+    ///
+    /// 地址留空时跟随「QQ 聊天」插件的配置——那是唯一值得人填一次的地方。
+    /// 换端口、给协议端开 token，都不用回来改这个插件，读它的配置就够。
+    /// 读不到就退回上一个版本的默认值，行为和以前完全一致。
+    /// </summary>
+    (string Url, string Token, string Source) ResolveOneBot()
+    {
+        string url = (Configuration.WsUrl ?? "").Trim();
+        string token = (Configuration.OneBotToken ?? "").Trim();
+
+        if (url.Length > 0)
+            return (url, token, "本插件");
+
+        // 按角色存，所以换角色读的是那个角色自己的 QQ 配置——不同角色可能是不同 bot 账号，这是对的。
+        // 第二条是兜底：StorageFolderPath 若已含角色层、或 StorageKey 为空，靠第一条拼不出来。
+        string[] candidates =
+        [
+            Path.Combine(AlifePath.StorageFolderPath, Character.StorageKey,
+                "Configuration", "Alife.Function.QChat.QChatService.json"),
+            Path.Combine(AlifePath.StorageFolderPath,
+                "Configuration", "Alife.Function.QChat.QChatService.json"),
+        ];
+
+        foreach (string path in candidates)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+
+                using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
+                string sharedUrl = document.RootElement.TryGetProperty("Url", out JsonElement u) ? u.GetString() ?? "" : "";
+                string sharedToken = document.RootElement.TryGetProperty("Token", out JsonElement t) ? t.GetString() ?? "" : "";
+                if (sharedUrl.Trim().Length > 0)
+                    return (sharedUrl.Trim(), token.Length > 0 ? token : sharedToken.Trim(), "QQ 聊天插件");
+            }
+            catch (Exception)
+            {
+                // 这个候选读不了就试下一个。配置坏了也不该让发消息失败在读取配置上
+            }
+        }
+
+        return ("ws://127.0.0.1:3001", token, "默认");
+    }
+
+    /// <summary>
+    /// 建连并鉴权。
+    /// token 必须在 ConnectAsync 之前写进请求头——连上之后 ClientWebSocket 不允许再改 Options。
+    /// </summary>
+    async Task ConnectOneBotAsync(ClientWebSocket connection, CancellationToken cancellationToken)
+    {
+        (string url, string token, _) = ResolveOneBot();
+        if (token.Length > 0)
+            connection.Options.SetRequestHeader("Authorization", "Bearer " + token);
+        await connection.ConnectAsync(new Uri(url), cancellationToken);
+    }
+
 
     const string BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
     const string ProbeBiliUrl = "https://www.bilibili.com";
@@ -111,7 +182,118 @@ public class QQMediaModule(
                 + "发不出去或下载失败先跑 MediaEnv，它会说明用的是哪个 yt-dlp、ffmpeg 在不在、B站与YouTube通不通、协议端是哪个端。"
         };
         functionCaller.RegisterHandler(handler, DocumentMode.Implicit, cancellationToken: DestroyCancellationToken);
+        ChatBot.ChatSend += OnChatSend;
+        logger.LogInformation("[QQMedia] 链接自动下载：{State}", Configuration.AutoDownloadLink ? "开" : "关");
         return Task.CompletedTask;
+    }
+
+    protected override Task OnDestroy()
+    {
+        ChatBot.ChatSend -= OnChatSend;
+        return Task.CompletedTask;
+    }
+
+    // ============================================================
+    // 链接自动下载
+    // ============================================================
+
+    /// <summary>短时间去重：同一条视频不因为一条消息里出现两次就下两遍。</summary>
+    readonly ConcurrentDictionary<string, DateTime> recentLinks = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 用户消息里带视频链接就直接下载并发出去，不改写消息本身。
+    /// 失败只记日志，不往会话里发东西。
+    /// </summary>
+    string OnChatSend(string message)
+    {
+        if (Configuration.EnableSend == false || Configuration.AutoDownloadLink == false)
+            return message;
+        if (string.IsNullOrWhiteSpace(message) || message.Contains("[系统推送消息]", StringComparison.Ordinal))
+            return message;
+
+        try
+        {
+            (long Id, bool IsGroup)? target = VideoLink.ParseTarget(message);
+            if (target == null)
+                return message;
+
+            VideoSource source = VideoLink.Parse(VideoLink.StripMarkers(message), null);
+            if (source.IsVideo == false || MarkRecent(source.Url) == false)
+                return message;
+
+            (long id, bool isGroup) = target.Value;
+            bool audio = VideoLink.LooksLikeAudio(message, source);
+            _ = Task.Run(() => AutoDownloadAsync(source, id, isGroup, audio));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[QQMedia] 链接自动下载检查失败");
+        }
+        return message;
+    }
+
+    bool MarkRecent(string url)
+    {
+        DateTime now = DateTime.Now;
+        foreach (string key in recentLinks.Where(pair => now - pair.Value > TimeSpan.FromMinutes(10))
+                     .Select(pair => pair.Key).ToList())
+        {
+            recentLinks.TryRemove(key, out _);
+        }
+        if (recentLinks.TryGetValue(url, out DateTime seen) && now - seen < TimeSpan.FromMinutes(10))
+            return false;
+        recentLinks[url] = now;
+        return true;
+    }
+
+    async Task AutoDownloadAsync(VideoSource source, long target, bool isGroup, bool audio)
+    {
+        string url = source.Url;
+        string noun = audio ? "音频" : "视频";
+        try
+        {
+            if (source.Kind == LinkKind.ShortUrl)
+            {
+                string resolved = await ResolveShortAsync(url);
+                VideoSource parsed = VideoLink.Parse(resolved, null);
+                if (parsed.Kind is LinkKind.Bvid or LinkKind.Aid)
+                    url = parsed.Url;
+            }
+
+            MediaFile media = await FetchMediaAsync(url, isVideo: audio == false, null);
+            (bool success, string failure) = await SendSegmentAsync(
+                target, isGroup, audio ? "record" : "video", media.Path);
+            if (success == false)
+            {
+                logger.LogWarning("[QQMedia] 链接自动下载（{Kind}）：已下载但没发出去 → {Target}：{Error}",
+                    noun, target, failure);
+                return;
+            }
+            logger.LogInformation("[QQMedia] 链接自动下载（{Kind}）：{Url} → {Target}（{Size}）",
+                noun, url, target, SizeText(new FileInfo(media.Path).Length));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("[QQMedia] 链接自动下载（{Kind}）失败 {Url}：{Error}", noun, url, ex.Message);
+        }
+    }
+
+    /// <summary>b23 短链跟一次重定向，拿到带 BV 的真实地址；失败就原样返回。</summary>
+    static async Task<string> ResolveShortAsync(string url)
+    {
+        try
+        {
+            using HttpClientHandler handler = new() { UseProxy = false };
+            using HttpClient client = new(handler) { Timeout = TimeSpan.FromSeconds(10) };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(BrowserUserAgent);
+            using HttpResponseMessage response = await client.GetAsync(
+                url, HttpCompletionOption.ResponseHeadersRead);
+            return response.RequestMessage?.RequestUri?.AbsoluteUri ?? url;
+        }
+        catch
+        {
+            return url;
+        }
     }
 
     // ============================================================
@@ -119,19 +301,23 @@ public class QQMediaModule(
     // ============================================================
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("按歌名搜索并下载音频，以QQ语音条发送。site留空走B站（国内直连），填yt走YouTube（需在配置里填代理）；本地已有同名文件直接复用不重新下载，只是名字前后缀接近时也会复用，那种情况回报里会写清用的是哪个文件、要准的就给BV号")]
+    [Description("按歌名搜索并下载音频，以QQ语音条发送。site留空走B站（国内直连），填yt走YouTube（需在配置里填代理）；mv=true 时改下载视频发 MV。本地已有同名文件直接复用不重新下载，只是名字前后缀接近时也会复用，那种情况回报里会写清用的是哪个文件、要准的就给BV号")]
     public async Task SendMusic(
         [Description("歌名关键词，可带歌手名，如 极乐净土 GARNiDELiA")] string keyword,
         [Description("目标群号或QQ号")] long? targetId = null,
         [Description("group或private，默认group")] string? type = null,
-        [Description("音源：留空=bilibili，yt=YouTube")] string? site = null)
+        [Description("音源：留空=bilibili，yt=YouTube")] string? site = null,
+        [Description("true=发这首歌的 MV（视频），默认 false 发语音条")] bool mv = false)
     {
         if (Gate(Configuration.EnableSend, "发送媒体")) return;
         if (targetId == null) throw new Exception("没给目标，发群里还是私聊得说一个");
         if (keyword.Trim().Length == 0) throw new Exception("没给歌名");
         bool isGroup = !string.Equals(type, "private", StringComparison.OrdinalIgnoreCase);
-        MediaFile media = await FetchMediaAsync(keyword, false, site);
-        await SendAndReportAsync(media, targetId.Value, isGroup, "record", "语音");
+        MediaFile media = await FetchMediaAsync(keyword, mv, site);
+        if (mv)
+            await SendAndReportAsync(media, targetId.Value, isGroup, "video", "MV");
+        else
+            await SendAndReportAsync(media, targetId.Value, isGroup, "record", "语音");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -192,11 +378,11 @@ public class QQMediaModule(
         try
         {
             await ResolveProviderAsync();
-            lines.Add("协议端：" + ProviderLabel() + "，地址 " + Configuration.WsUrl);
+            lines.Add("协议端：" + ProviderLabel() + "，地址 " + ResolveOneBot().Url + "（来自 " + ResolveOneBot().Source + "）");
         }
         catch (Exception wsError)
         {
-            lines.Add("❌ 协议端连不上（" + Configuration.WsUrl + "）：" + wsError.Message);
+            lines.Add("❌ 协议端连不上（" + ResolveOneBot().Url + "，来自 " + ResolveOneBot().Source + "）：" + wsError.Message);
         }
         lines.Add("发送开关：" + (Configuration.EnableSend ? "开" : "关") + "，超时 音频" + TimeoutSeconds(false) + "秒/视频" + TimeoutSeconds(true)
             + "秒，B站请求已带 Referer（本机实测不带更容易被412拒）");
@@ -745,7 +931,7 @@ public class QQMediaModule(
             sharedWs?.Dispose();
             ClientWebSocket connection = new();
             using CancellationTokenSource connectTimeout = new(TimeSpan.FromSeconds(10));
-            await connection.ConnectAsync(new Uri(Configuration.WsUrl), connectTimeout.Token);
+            await ConnectOneBotAsync(connection, connectTimeout.Token);
             sharedWs = connection;
         }
         string echo = Guid.NewGuid().ToString();
